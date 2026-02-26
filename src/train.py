@@ -400,16 +400,30 @@ def mlp_predict_proba(model: TabularMLP, X: np.ndarray) -> np.ndarray:
 
 
 def main() -> None:
+
     """
-    Pipeline complet.
+    Experimental pipeline for binary classification of breast cancer.
     """
+
+    # ==========================================================
+    # 1. Reproducibility
+    # ==========================================================
     set_seed(RANDOM_STATE)
 
+    # ==========================================================
+    # 2. Data Loading
+    # ==========================================================
     df = load_dataset()
     basic_sanity_checks(df)
 
+    # ==========================================================
+    # 3. Feature / Target Preparation
+    # ==========================================================
     X, y = prepare_features_and_target(df)
 
+    # ==========================================================
+    # 4. Train / Test Split (Strict Hold-Out)
+    # ==========================================================
     X_train_df, X_test_df, y_train, y_test = train_test_split(
         X,
         y.values,
@@ -421,11 +435,16 @@ def main() -> None:
     preprocess = make_preprocess_pipeline()
     models = make_models()
 
+    # ==========================================================
+    # 5. Cross-Validation Benchmark - Classical Models
+    # ==========================================================
+
     print("\n" + "=" * 60)
-    print("Comparaison modèles classiques")
+    print("Cross-Validation Benchmark - Classical Models")
     print("=" * 60)
 
     cv_summary: List[Dict[str, Any]] = []
+
     for name, model in models.items():
         pipe = Pipeline(
             steps=[
@@ -433,10 +452,27 @@ def main() -> None:
                 ("model", model),
             ]
         )
-        mean_auc, std_auc = cv_scores_pipeline(pipe, X_train_df, y_train, scoring="roc_auc", cv_folds=CV_FOLDS)
-        mean_f1, std_f1 = cv_scores_pipeline(pipe, X_train_df, y_train, scoring="f1", cv_folds=CV_FOLDS)
 
-        print(f"{name} ROC_AUC {mean_auc:.4f} (+/- {std_auc:.4f}) F1 {mean_f1:.4f} (+/- {std_f1:.4f})")
+        mean_auc, std_auc = cv_scores_pipeline(
+            pipe,
+            X_train_df,
+            y_train,
+            scoring="roc_auc",
+            cv_folds=CV_FOLDS,
+        )
+
+        mean_f1, std_f1 = cv_scores_pipeline(
+            pipe,
+            X_train_df,
+            y_train,
+            scoring="f1",
+            cv_folds=CV_FOLDS,
+        )
+
+        print(
+            f"{name} | ROC_AUC {mean_auc:.4f} (+/- {std_auc:.4f}) "
+            f"| F1 {mean_f1:.4f} (+/- {std_f1:.4f})"
+        )
 
         cv_summary.append(
             {
@@ -448,17 +484,33 @@ def main() -> None:
             }
         )
 
+    # ==========================================================
+    # 6. Custom Soft Voting (Manual Implementation)
+    # ==========================================================
+
     print("\n" + "=" * 60)
-    print("Custom Soft Voting manuel")
+    print("Custom Soft Voting - Cross-Validation")
     print("=" * 60)
 
     voting_estimators = [
-        Pipeline([("preprocess", preprocess), ("model", models["LogisticRegression"])]),
-        Pipeline([("preprocess", preprocess), ("model", models["RandomForest"])]),
+        Pipeline(
+            [("preprocess", preprocess),
+             ("model", models["LogisticRegression"])]
+        ),
+        Pipeline(
+            [("preprocess", preprocess),
+             ("model", models["RandomForest"])]
+        ),
     ]
+
     soft_voting = SoftVotingManual(estimators=voting_estimators)
 
-    cv = StratifiedKFold(n_splits=CV_FOLDS, shuffle=True, random_state=RANDOM_STATE)
+    cv = StratifiedKFold(
+        n_splits=CV_FOLDS,
+        shuffle=True,
+        random_state=RANDOM_STATE,
+    )
+
     voting_auc_scores: List[float] = []
     voting_f1_scores: List[float] = []
 
@@ -469,17 +521,32 @@ def main() -> None:
         y_va = y_train[val_idx]
 
         soft_voting.fit(X_tr, y_tr)
+
         proba = soft_voting.predict_proba(X_va)[:, 1]
         pred = (proba >= 0.5).astype(int)
 
-        voting_auc_scores.append(float(roc_auc_score(y_va, proba)))
-        voting_f1_scores.append(float(f1_score(y_va, pred)))
+        voting_auc_scores.append(
+            float(roc_auc_score(y_va, proba))
+        )
+        voting_f1_scores.append(
+            float(f1_score(y_va, pred))
+        )
 
-    print(f"SoftVotingManual ROC_AUC {np.mean(voting_auc_scores):.4f} (+/- {np.std(voting_auc_scores):.4f})")
-    print(f"SoftVotingManual F1 {np.mean(voting_f1_scores):.4f} (+/- {np.std(voting_f1_scores):.4f})")
+    print(
+        f"SoftVoting | ROC_AUC {np.mean(voting_auc_scores):.4f} "
+        f"(+/- {np.std(voting_auc_scores):.4f})"
+    )
+    print(
+        f"SoftVoting | F1 {np.mean(voting_f1_scores):.4f} "
+        f"(+/- {np.std(voting_f1_scores):.4f})"
+    )
+
+    # ==========================================================
+    # 7. Hyperparameter Optimization - Decision Tree
+    # ==========================================================
 
     print("\n" + "=" * 60)
-    print("Grid search manuel DecisionTree")
+    print("Hyperparameter Optimization - DecisionTree")
     print("=" * 60)
 
     dt_grid = {
@@ -488,68 +555,51 @@ def main() -> None:
         "random_state": [RANDOM_STATE],
     }
 
-    best_params, best_score, dt_results = grid_search_manual_pipeline(
-        X_train_df,
-        y_train,
-        preprocess,
-        DecisionTreeClassifier,
-        dt_grid,
-        scoring="roc_auc",
-        cv_folds=CV_FOLDS,
+    best_params, best_score, dt_results = (
+        grid_search_manual_pipeline(
+            X_train_df,
+            y_train,
+            preprocess,
+            DecisionTreeClassifier,
+            dt_grid,
+            scoring="roc_auc",
+            cv_folds=CV_FOLDS,
+        )
     )
 
-    print(f"Nombre de combinaisons testées: {len(dt_results)}")
-    print(f"Meilleurs paramètres: {best_params}")
-    print(f"Meilleur score CV ROC_AUC: {best_score:.4f}")
+    print(f"Best parameters: {best_params}")
+    print(f"Best CV ROC_AUC: {best_score:.4f}")
 
+    # ==========================================================
+    # 8. Final Evaluation on Held-Out Test Set
+    # ==========================================================
     print("\n" + "=" * 60)
-    print("Évaluation finale sur test set")
+    print("Final Evaluation - Test Set")
     print("=" * 60)
 
     test_metrics: List[Dict[str, Any]] = []
 
     for name, model in models.items():
-        pipe = Pipeline([("preprocess", preprocess), ("model", model)])
+        pipe = Pipeline(
+            [("preprocess", preprocess),
+             ("model", model)]
+        )
         pipe.fit(X_train_df, y_train)
-        m = evaluate_pipeline_on_test(pipe, X_test_df, y_test, name=name)
-        m["model"] = name
-        test_metrics.append(m)
 
-    soft_voting.fit(X_train_df, y_train)
-    proba_test = soft_voting.predict_proba(X_test_df)[:, 1]
-    pred_test = (proba_test >= 0.5).astype(int)
+        metrics = evaluate_pipeline_on_test(
+            pipe,
+            X_test_df,
+            y_test,
+            name=name,
+        )
+        metrics["model"] = name
+        test_metrics.append(metrics)
 
-    sv_metrics = {
-        "model": "SoftVotingManual",
-        "accuracy": float(accuracy_score(y_test, pred_test)),
-        "f1": float(f1_score(y_test, pred_test)),
-        "recall": float(recall_score(y_test, pred_test)),
-        "roc_auc": float(roc_auc_score(y_test, proba_test)),
-    }
+    # ==========================================================
+    # 9. Deep Learning Model (MLP)
+    # ==========================================================
     print("\n" + "=" * 60)
-    print("Résultats test set SoftVotingManual")
-    print(f"Accuracy {sv_metrics['accuracy']:.4f}")
-    print(f"F1 {sv_metrics['f1']:.4f}")
-    print(f"Recall {sv_metrics['recall']:.4f}")
-    print(f"ROC_AUC {sv_metrics['roc_auc']:.4f}")
-    print("Matrice de confusion")
-    print(confusion_matrix(y_test, pred_test))
-
-    test_metrics.append(sv_metrics)
-
-    best_dt_pipe = Pipeline(
-        steps=[
-            ("preprocess", preprocess),
-            ("model", DecisionTreeClassifier(**best_params)),
-        ]
-    )
-    best_dt_pipe.fit(X_train_df, y_train)
-    dtm = evaluate_pipeline_on_test(best_dt_pipe, X_test_df, y_test, name="DecisionTree best grid")
-    dtm["model"] = "DecisionTree best grid"
-    test_metrics.append(dtm)
-
-    print("\n" + "=" * 60)
-    print("Deep learning MLP")
+    print("Deep Learning - MLP")
     print("=" * 60)
 
     X_tr_df, X_val_df, y_tr, y_val = train_test_split(
@@ -561,6 +611,7 @@ def main() -> None:
     )
 
     dl_preprocess = make_preprocess_pipeline()
+
     X_tr = dl_preprocess.fit_transform(X_tr_df)
     X_val = dl_preprocess.transform(X_val_df)
     X_te = dl_preprocess.transform(X_test_df)
@@ -577,21 +628,18 @@ def main() -> None:
         "recall": float(recall_score(y_test, pred_mlp)),
         "roc_auc": float(roc_auc_score(y_test, proba_mlp)),
     }
-
-    print("Résultats test set MLP")
-    print(f"Accuracy {mlp_metrics['accuracy']:.4f}")
-    print(f"F1 {mlp_metrics['f1']:.4f}")
-    print(f"Recall {mlp_metrics['recall']:.4f}")
-    print(f"ROC_AUC {mlp_metrics['roc_auc']:.4f}")
-    print("Matrice de confusion")
-    print(confusion_matrix(y_test, pred_mlp))
+    
 
     test_metrics.append(mlp_metrics)
 
+    # ==========================================================
+    # 10. Export Results
+    # ==========================================================
     metrics_df = pd.DataFrame(test_metrics)
     metrics_path = ARTIFACTS_DIR / "test_metrics.csv"
     metrics_df.to_csv(metrics_path, index=False)
-    print("\nMétriques sauvegardées :", metrics_path)
+
+    print("\nMetrics saved to:", metrics_path)
 
 
 if __name__ == "__main__":
