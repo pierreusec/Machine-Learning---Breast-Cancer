@@ -43,6 +43,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 
+import joblib
 
 RANDOM_STATE = 42
 TEST_SIZE = 0.2
@@ -604,6 +605,28 @@ def main() -> None:
         metrics["model"] = name
         test_metrics.append(metrics)
 
+    # Identify best classical model based on ROC_AUC
+    best_classical = max(
+        test_metrics,
+        key=lambda x: x["roc_auc"]
+    )
+
+    best_model_name = best_classical["model"]
+    print("\nBest classical model:", best_model_name)
+
+    best_pipe = Pipeline(
+        [
+            ("preprocess", preprocess),
+            ("model", models[best_model_name]),
+        ]
+    )
+    best_pipe.fit(X_train_df, y_train)
+
+    model_path = ARTIFACTS_DIR / "best_classical_model.pkl"
+    joblib.dump(best_pipe, model_path)
+
+    print("Best classical model saved to:", model_path)
+
     # ==========================================================
     # 9. Deep Learning Model (MLP)
     # ==========================================================
@@ -637,6 +660,11 @@ def main() -> None:
         "recall": float(recall_score(y_test, pred_mlp)),
         "roc_auc": float(roc_auc_score(y_test, proba_mlp)),
     }
+
+    mlp_path = ARTIFACTS_DIR / "mlp_weights.pt"
+    torch.save(mlp.state_dict(), mlp_path)
+
+    print("MLP weights saved to:", mlp_path)
     
 
     test_metrics.append(mlp_metrics)
