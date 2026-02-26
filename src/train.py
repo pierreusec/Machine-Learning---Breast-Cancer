@@ -485,6 +485,15 @@ def main() -> None:
         )
 
     # ==========================================================
+    # Save Cross-Validation Results
+    # ==========================================================
+    cv_df = pd.DataFrame(cv_summary)
+    cv_path = ARTIFACTS_DIR / "cv_metrics.csv"
+    cv_df.to_csv(cv_path, index=False)
+
+    print("\nCross-validation metrics saved to:", cv_path)
+
+    # ==========================================================
     # 6. Custom Soft Voting (Manual Implementation)
     # ==========================================================
 
