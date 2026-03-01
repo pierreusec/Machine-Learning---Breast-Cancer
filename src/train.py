@@ -1,158 +1,41 @@
 """
-Projet Machine Learning Supervisé
-Classification binaire cancer du sein
-Target diagnosis
-M malignant
-B benign
-
-Ce script
-Télécharge et charge le dataset via KaggleHub
-Applique un preprocessing sans fuite d'information
-Compare plusieurs modèles classiques
-Ajoute un soft voting manuel
-Entraîne un MLP tabulaire en deep learning
-Évalue sur un test set final
-Sauvegarde les métriques dans artifacts
+Main experimental pipeline.
 """
 
 from __future__ import annotations
 
-import os
-import random
-from dataclasses import dataclass
-from itertools import product
-from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import List, Dict, Any
 
 import numpy as np
 import pandas as pd
-import kagglehub as kg
+import joblib
+import torch
 
-from sklearn.base import BaseEstimator
-from sklearn.model_selection import StratifiedKFold, train_test_split, cross_val_score
+from sklearn.model_selection import train_test_split, StratifiedKFold
 from sklearn.pipeline import Pipeline
 from sklearn.impute import SimpleImputer
 from sklearn.preprocessing import StandardScaler
-
 from sklearn.metrics import (
-    accuracy_score,
-    confusion_matrix,
-    f1_score,
-    recall_score,
     roc_auc_score,
+    f1_score,
+    accuracy_score,
+    recall_score,
     average_precision_score,
-    roc_curve,
-    precision_recall_curve,
 )
 
-import matplotlib.pyplot as plt
-
-from sklearn.linear_model import LogisticRegression
-from sklearn.tree import DecisionTreeClassifier
-from sklearn.ensemble import RandomForestClassifier
-
-import torch
-import torch.nn as nn
-import torch.optim as optim
-
-import joblib
-
-RANDOM_STATE = 42
-TEST_SIZE = 0.2
-CV_FOLDS = 5
-DATASET_SLUG = "yasserh/breast-cancer-dataset"
-
-from pathlib import Path
-
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-ARTIFACTS_DIR = PROJECT_ROOT / "artifacts"
-ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
-
-def set_seed(seed: int) -> None:
-    """
-    Fixe les graines pour reproductibilité.
-    """
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
+# Local modules
+from config import *
+from data import *
+from models import *
+from evaluation import *
+from dl import *
 
 
-def find_first_csv(folder_path: str) -> str:
-    """
-    Trouve le premier fichier csv dans un dossier.
-    """
-    csv_files: List[str] = []
-    for root, _, files in os.walk(folder_path):
-        for file_name in files:
-            if file_name.lower().endswith(".csv"):
-                csv_files.append(os.path.join(root, file_name))
-
-    if not csv_files:
-        raise FileNotFoundError("Aucun fichier csv trouvé dans le dossier téléchargé.")
-
-    return csv_files[0]
-
-
-def load_dataset() -> pd.DataFrame:
-    """
-    Télécharge le dataset via KaggleHub et charge le csv.
-    """
-    path = kg.dataset_download(DATASET_SLUG)
-    print("Path to dataset files:", path)
-
-    csv_path = find_first_csv(path)
-    print("CSV utilisé :", csv_path)
-
-    df = pd.read_csv(csv_path)
-    return df
-
-
-def basic_sanity_checks(df: pd.DataFrame) -> None:
-    """
-    Vérifications rapides.
-    """
-    required_cols = {"id", "diagnosis"}
-    missing = required_cols - set(df.columns)
-    if missing:
-        raise ValueError(f"Colonnes manquantes: {missing}")
-
-    print("Nombre de lignes :", df.shape[0])
-    print("Nombre de colonnes :", df.shape[1])
-    print("Valeurs manquantes totales :", int(df.isnull().sum().sum()))
-
-
-def prepare_features_and_target(df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.Series]:
-    """
-    Prépare X et y.
-    Retire id des features.
-    Encode diagnosis en binaire M 1 B 0.
-    Force les features en numérique.
-    """
-    y_raw = df["diagnosis"].astype(str).str.strip()
-    y = y_raw.map({"M": 1, "B": 0})
-
-    if y.isnull().any():
-        bad_values = sorted(set(y_raw[y.isnull()].unique()))
-        raise ValueError(f"Valeurs inattendues dans diagnosis: {bad_values}")
-
-    X = df.drop(columns=["diagnosis"]).copy()
-
-    if "id" in X.columns:
-        X = X.drop(columns=["id"])
-
-    for col in X.columns:
-        if X[col].dtype == "object":
-            X[col] = pd.to_numeric(X[col], errors="coerce")
-
-    return X, y
-
+# ==========================================================
+# Local Preprocess (kept as before)
+# ==========================================================
 
 def make_preprocess_pipeline() -> Pipeline:
-    """
-    Pipeline preprocessing.
-    Imputation médiane puis standardisation.
-    """
     return Pipeline(
         steps=[
             ("imputer", SimpleImputer(strategy="median")),
@@ -161,331 +44,24 @@ def make_preprocess_pipeline() -> Pipeline:
     )
 
 
-def make_models() -> Dict[str, BaseEstimator]:
-    """
-    Modèles classiques.
-    """
-    models: Dict[str, BaseEstimator] = {
-        "LogisticRegression": LogisticRegression(max_iter=3000, random_state=RANDOM_STATE),
-        "DecisionTree": DecisionTreeClassifier(random_state=RANDOM_STATE),
-        "RandomForest": RandomForestClassifier(
-            n_estimators=400,
-            random_state=RANDOM_STATE,
-            n_jobs=-1,
-        ),
-    }
-    return models
-
-
-def cv_scores_pipeline(
-    pipe: Pipeline,
-    X: pd.DataFrame,
-    y: np.ndarray,
-    scoring: str,
-    cv_folds: int,
-) -> Tuple[float, float]:
-    """
-    Score moyen et écart type en CV.
-    Le preprocessing est inclus dans la CV donc pas de fuite.
-    """
-    cv = StratifiedKFold(n_splits=cv_folds, shuffle=True, random_state=RANDOM_STATE)
-    scores = cross_val_score(pipe, X, y, cv=cv, scoring=scoring)
-    return float(scores.mean()), float(scores.std())
-
-
-def evaluate_pipeline_on_test(
-    pipe: Pipeline,
-    X_test: pd.DataFrame,
-    y_test: np.ndarray,
-    name: str,
-) -> Dict[str, float]:
-
-    y_pred = pipe.predict(X_test)
-
-    if hasattr(pipe, "predict_proba"):
-        y_proba = pipe.predict_proba(X_test)[:, 1]
-        auc = roc_auc_score(y_test, y_proba)
-        pr_auc = average_precision_score(y_test, y_proba)
-    else:
-        auc = float("nan")
-        pr_auc = float("nan")
-
-    acc = accuracy_score(y_test, y_pred)
-    f1 = f1_score(y_test, y_pred)
-    rec = recall_score(y_test, y_pred)
-
-    cm = confusion_matrix(y_test, y_pred)
-
-    print("\n" + "=" * 60)
-    print(f"Résultats test set {name}")
-    print(f"Accuracy {acc:.4f}")
-    print(f"F1 {f1:.4f}")
-    print(f"Recall {rec:.4f}")
-    print(f"ROC_AUC {auc:.4f}")
-    print(f"PR_AUC {pr_auc:.4f}")
-    print("Matrice de confusion")
-    print(cm)
-
-    return {
-        "accuracy": acc,
-        "f1": f1,
-        "recall": rec,
-        "roc_auc": auc,
-        "pr_auc": pr_auc,
-    }
-
-
-def save_roc_pr_curves(
-    y_true: np.ndarray,
-    y_proba: np.ndarray,
-    model_name: str,
-) -> None:
-
-    # ROC Curve
-    fpr, tpr, _ = roc_curve(y_true, y_proba)
-    roc_auc = roc_auc_score(y_true, y_proba)
-
-    plt.figure()
-    plt.plot(fpr, tpr, label=f"AUC = {roc_auc:.4f}")
-    plt.plot([0, 1], [0, 1], linestyle="--")
-    plt.xlabel("False Positive Rate")
-    plt.ylabel("True Positive Rate")
-    plt.title(f"ROC Curve - {model_name}")
-    plt.legend()
-    plt.tight_layout()
-
-    roc_path = ARTIFACTS_DIR / f"{model_name}_roc_curve.png"
-    plt.savefig(roc_path)
-    plt.close()
-
-    # Precision-Recall Curve
-    precision, recall, _ = precision_recall_curve(y_true, y_proba)
-    pr_auc = average_precision_score(y_true, y_proba)
-
-    plt.figure()
-    plt.plot(recall, precision, label=f"PR AUC = {pr_auc:.4f}")
-    plt.xlabel("Recall")
-    plt.ylabel("Precision")
-    plt.title(f"Precision-Recall Curve - {model_name}")
-    plt.legend()
-    plt.tight_layout()
-
-    pr_path = ARTIFACTS_DIR / f"{model_name}_pr_curve.png"
-    plt.savefig(pr_path)
-    plt.close()
-
-    print("ROC curve saved to:", roc_path)
-    print("PR curve saved to:", pr_path)
-
-
-def grid_search_manual_pipeline(
-    X: pd.DataFrame,
-    y: np.ndarray,
-    preprocess: Pipeline,
-    model_class: Any,
-    param_grid: Dict[str, List[Any]],
-    scoring: str,
-    cv_folds: int,
-) -> Tuple[Dict[str, Any], float, List[Dict[str, Any]]]:
-    """
-    Grid search manuel.
-    """
-    results: List[Dict[str, Any]] = []
-    best_score = -np.inf
-    best_params: Dict[str, Any] = {}
-
-    param_names = list(param_grid.keys())
-    param_values = list(param_grid.values())
-
-    cv = StratifiedKFold(n_splits=cv_folds, shuffle=True, random_state=RANDOM_STATE)
-
-    for values in product(*param_values):
-        params = dict(zip(param_names, values))
-        model = model_class(**params)
-
-        pipe = Pipeline(
-            steps=[
-                ("preprocess", preprocess),
-                ("model", model),
-            ]
-        )
-
-        scores = cross_val_score(pipe, X, y, cv=cv, scoring=scoring)
-        mean_score = float(scores.mean())
-        std_score = float(scores.std())
-
-        results.append({"params": params, "mean_score": mean_score, "std_score": std_score})
-
-        print(f"Params: {params} -> Score: {mean_score:.4f} (+/- {std_score:.4f})")
-
-        if mean_score > best_score:
-            best_score = mean_score
-            best_params = params
-
-    return best_params, float(best_score), results
-
-
-@dataclass
-class SoftVotingManual:
-    """
-    Soft voting manuel basé sur la moyenne des probabilités.
-    Les estimateurs doivent exposer predict_proba.
-    """
-    estimators: List[Pipeline]
-
-    def fit(self, X: pd.DataFrame, y: np.ndarray) -> "SoftVotingManual":
-        for est in self.estimators:
-            est.fit(X, y)
-        return self
-
-    def predict_proba(self, X: pd.DataFrame) -> np.ndarray:
-        probas: List[np.ndarray] = []
-        for est in self.estimators:
-            probas.append(est.predict_proba(X))
-        avg = np.mean(np.stack(probas, axis=0), axis=0)
-        return avg
-
-    def predict(self, X: pd.DataFrame) -> np.ndarray:
-        proba_pos = self.predict_proba(X)[:, 1]
-        return (proba_pos >= 0.5).astype(int)
-
-
-class TabularMLP(nn.Module):
-    """
-    MLP pour données tabulaires.
-    """
-    def __init__(self, n_features: int) -> None:
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(n_features, 64),
-            nn.ReLU(),
-            nn.Dropout(p=0.2),
-            nn.Linear(64, 32),
-            nn.ReLU(),
-            nn.Dropout(p=0.2),
-            nn.Linear(32, 1),
-        )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.net(x).squeeze(1)
-
-
-def train_mlp(
-    X_train: np.ndarray,
-    y_train: np.ndarray,
-    X_val: np.ndarray,
-    y_val: np.ndarray,
-    max_epochs: int = 200,
-    lr: float = 1e-3,
-    batch_size: int = 64,
-    patience: int = 15,
-) -> TabularMLP:
-    """
-    Entraînement MLP avec early stopping.
-    """
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    model = TabularMLP(n_features=X_train.shape[1]).to(device)
-    criterion = nn.BCEWithLogitsLoss()
-    optimizer = optim.Adam(model.parameters(), lr=lr)
-
-    X_train_t = torch.tensor(X_train, dtype=torch.float32)
-    y_train_t = torch.tensor(y_train, dtype=torch.float32)
-    X_val_t = torch.tensor(X_val, dtype=torch.float32)
-    y_val_t = torch.tensor(y_val, dtype=torch.float32)
-
-    best_val_loss = float("inf")
-    best_state: Dict[str, torch.Tensor] | None = None
-    no_improve = 0
-
-    n_train = X_train.shape[0]
-    indices = np.arange(n_train)
-
-    for epoch in range(1, max_epochs + 1):
-        model.train()
-        np.random.shuffle(indices)
-
-        epoch_loss = 0.0
-        for start in range(0, n_train, batch_size):
-            batch_idx = indices[start : start + batch_size]
-            xb = X_train_t[batch_idx].to(device)
-            yb = y_train_t[batch_idx].to(device)
-
-            optimizer.zero_grad()
-            logits = model(xb)
-            loss = criterion(logits, yb)
-            loss.backward()
-            optimizer.step()
-
-            epoch_loss += float(loss.item()) * len(batch_idx)
-
-        epoch_loss /= n_train
-
-        model.eval()
-        with torch.no_grad():
-            logits_val = model(X_val_t.to(device))
-            val_loss = float(criterion(logits_val, y_val_t.to(device)).item())
-
-        print(f"Epoch {epoch:03d} train_loss={epoch_loss:.4f} val_loss={val_loss:.4f}")
-
-        if val_loss < best_val_loss - 1e-6:
-            best_val_loss = val_loss
-            best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
-            no_improve = 0
-        else:
-            no_improve += 1
-            if no_improve >= patience:
-                print("Early stopping")
-                break
-
-    if best_state is not None:
-        model.load_state_dict(best_state)
-
-    return model
-
-
-def mlp_predict_proba(model: TabularMLP, X: np.ndarray) -> np.ndarray:
-    """
-    Probabilités pour le MLP.
-    """
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model.eval()
-    model.to(device)
-
-    with torch.no_grad():
-        xt = torch.tensor(X, dtype=torch.float32).to(device)
-        logits = model(xt)
-        proba_pos = torch.sigmoid(logits).cpu().numpy()
-
-    proba_neg = 1.0 - proba_pos
-    return np.vstack([proba_neg, proba_pos]).T
-
+# ==========================================================
+# Main
+# ==========================================================
 
 def main() -> None:
 
-    """
-    Experimental pipeline for binary classification of breast cancer.
-    """
+    # ==========================================================
+    # 1. Data Loading
+    # ==========================================================
 
-    # ==========================================================
-    # 1. Reproducibility
-    # ==========================================================
-    set_seed(RANDOM_STATE)
-
-    # ==========================================================
-    # 2. Data Loading
-    # ==========================================================
-    df = load_dataset()
+    df = load_dataset(DATASET_SLUG)
     basic_sanity_checks(df)
-
-    # ==========================================================
-    # 3. Feature / Target Preparation
-    # ==========================================================
     X, y = prepare_features_and_target(df)
 
     # ==========================================================
-    # 4. Train / Test Split (Strict Hold-Out)
+    # 2. Train / Test Split
     # ==========================================================
+
     X_train_df, X_test_df, y_train, y_test = train_test_split(
         X,
         y.values,
@@ -495,21 +71,20 @@ def main() -> None:
     )
 
     preprocess = make_preprocess_pipeline()
-    models = make_models()
+    models = make_models(RANDOM_STATE)
 
     # ==========================================================
-    # 5. Cross-Validation Benchmark - Classical Models
+    # 3. Cross-Validation Benchmark
     # ==========================================================
 
-    print("\n" + "=" * 60)
-    print("Cross-Validation Benchmark - Classical Models")
-    print("=" * 60)
+    print("\nCross-Validation Benchmark Ok\n")
 
     cv_summary: List[Dict[str, Any]] = []
 
     for name, model in models.items():
+
         pipe = Pipeline(
-            steps=[
+            [
                 ("preprocess", preprocess),
                 ("model", model),
             ]
@@ -521,6 +96,7 @@ def main() -> None:
             y_train,
             scoring="roc_auc",
             cv_folds=CV_FOLDS,
+            random_state=RANDOM_STATE,
         )
 
         mean_f1, std_f1 = cv_scores_pipeline(
@@ -529,6 +105,7 @@ def main() -> None:
             y_train,
             scoring="f1",
             cv_folds=CV_FOLDS,
+            random_state=RANDOM_STATE,
         )
 
         mean_pr, std_pr = cv_scores_pipeline(
@@ -537,154 +114,60 @@ def main() -> None:
             y_train,
             scoring="average_precision",
             cv_folds=CV_FOLDS,
+            random_state=RANDOM_STATE,
         )
 
         print(
-            f"{name} | ROC_AUC {mean_auc:.4f} (+/- {std_auc:.4f}) "
-            f"| F1 {mean_f1:.4f} (+/- {std_f1:.4f}) "
-            f"| PR_AUC {mean_pr:.4f} (+/- {std_pr:.4f})"
+            f"{name} | ROC_AUC {mean_auc:.4f} "
+            f"| F1 {mean_f1:.4f} "
+            f"| PR_AUC {mean_pr:.4f}"
         )
 
         cv_summary.append(
             {
                 "model": name,
                 "roc_auc_mean": mean_auc,
-                "roc_auc_std": std_auc,
                 "f1_mean": mean_f1,
-                "f1_std": std_f1,
                 "pr_auc_mean": mean_pr,
-                "pr_auc_std": std_pr,
             }
         )
 
-    # ==========================================================
-    # Save Cross-Validation Results
-    # ==========================================================
-    cv_df = pd.DataFrame(cv_summary)
-    cv_path = ARTIFACTS_DIR / "cv_metrics.csv"
-    cv_df.to_csv(cv_path, index=False)
-
-    print("\nCross-validation metrics saved to:", cv_path)
-
-    # ==========================================================
-    # 6. Custom Soft Voting (Manual Implementation)
-    # ==========================================================
-
-    print("\n" + "=" * 60)
-    print("Custom Soft Voting - Cross-Validation")
-    print("=" * 60)
-
-    voting_estimators = [
-        Pipeline(
-            [("preprocess", preprocess),
-             ("model", models["LogisticRegression"])]
-        ),
-        Pipeline(
-            [("preprocess", preprocess),
-             ("model", models["RandomForest"])]
-        ),
-    ]
-
-    soft_voting = SoftVotingManual(estimators=voting_estimators)
-
-    cv = StratifiedKFold(
-        n_splits=CV_FOLDS,
-        shuffle=True,
-        random_state=RANDOM_STATE,
-    )
-
-    voting_auc_scores: List[float] = []
-    voting_f1_scores: List[float] = []
-
-    for train_idx, val_idx in cv.split(X_train_df, y_train):
-        X_tr = X_train_df.iloc[train_idx]
-        y_tr = y_train[train_idx]
-        X_va = X_train_df.iloc[val_idx]
-        y_va = y_train[val_idx]
-
-        soft_voting.fit(X_tr, y_tr)
-
-        proba = soft_voting.predict_proba(X_va)[:, 1]
-        pred = (proba >= 0.5).astype(int)
-
-        voting_auc_scores.append(
-            float(roc_auc_score(y_va, proba))
-        )
-        voting_f1_scores.append(
-            float(f1_score(y_va, pred))
-        )
-
-    print(
-        f"SoftVoting | ROC_AUC {np.mean(voting_auc_scores):.4f} "
-        f"(+/- {np.std(voting_auc_scores):.4f})"
-    )
-    print(
-        f"SoftVoting | F1 {np.mean(voting_f1_scores):.4f} "
-        f"(+/- {np.std(voting_f1_scores):.4f})"
+    pd.DataFrame(cv_summary).to_csv(
+        ARTIFACTS_DIR / "cv_metrics.csv",
+        index=False,
     )
 
     # ==========================================================
-    # 7. Hyperparameter Optimization - Decision Tree
+    # 4. Final Evaluation on Test Set
     # ==========================================================
 
-    print("\n" + "=" * 60)
-    print("Hyperparameter Optimization - DecisionTree")
-    print("=" * 60)
-
-    dt_grid = {
-        "max_depth": [2, 3, 4, 5, None],
-        "min_samples_split": [2, 5, 10],
-        "random_state": [RANDOM_STATE],
-    }
-
-    best_params, best_score, dt_results = (
-        grid_search_manual_pipeline(
-            X_train_df,
-            y_train,
-            preprocess,
-            DecisionTreeClassifier,
-            dt_grid,
-            scoring="roc_auc",
-            cv_folds=CV_FOLDS,
-        )
-    )
-
-    print(f"Best parameters: {best_params}")
-    print(f"Best CV ROC_AUC: {best_score:.4f}")
-
-    # ==========================================================
-    # 8. Final Evaluation on Held-Out Test Set
-    # ==========================================================
-    print("\n" + "=" * 60)
-    print("Final Evaluation - Test Set")
-    print("=" * 60)
+    print("\nFinal Evaluation - Test Set Ok\n")
 
     test_metrics: List[Dict[str, Any]] = []
 
     for name, model in models.items():
+
         pipe = Pipeline(
-            [("preprocess", preprocess),
-             ("model", model)]
+            [
+                ("preprocess", preprocess),
+                ("model", model),
+            ]
         )
+
         pipe.fit(X_train_df, y_train)
 
         metrics = evaluate_pipeline_on_test(
             pipe,
             X_test_df,
             y_test,
-            name=name,
         )
+
         metrics["model"] = name
         test_metrics.append(metrics)
 
-    # Identify best classical model based on ROC_AUC
-    best_classical = max(
-        test_metrics,
-        key=lambda x: x["roc_auc"]
-    )
-
+    # Select best classical model
+    best_classical = max(test_metrics, key=lambda x: x["roc_auc"])
     best_model_name = best_classical["model"]
-    print("\nBest classical model:", best_model_name)
 
     best_pipe = Pipeline(
         [
@@ -692,27 +175,28 @@ def main() -> None:
             ("model", models[best_model_name]),
         ]
     )
+
     best_pipe.fit(X_train_df, y_train)
 
-    model_path = ARTIFACTS_DIR / "best_classical_model.pkl"
-    joblib.dump(best_pipe, model_path)
+    joblib.dump(
+        best_pipe,
+        ARTIFACTS_DIR / "best_classical_model.pkl",
+    )
 
-    print("Best classical model saved to:", model_path)
-
-    # Generate ROC and PR curves for best classical model
     best_proba = best_pipe.predict_proba(X_test_df)[:, 1]
+
     save_roc_pr_curves(
         y_true=y_test,
         y_proba=best_proba,
-            model_name=best_model_name,
+        model_name=best_model_name,
+        artifacts_dir=ARTIFACTS_DIR,
     )
 
     # ==========================================================
-    # 9. Deep Learning Model (MLP)
+    # 5. Deep Learning
     # ==========================================================
-    print("\n" + "=" * 60)
-    print("Deep Learning - MLP")
-    print("=" * 60)
+
+    print("\nDeep Learning - MLP Ok\n")
 
     X_tr_df, X_val_df, y_tr, y_val = train_test_split(
         X_train_df,
@@ -742,22 +226,26 @@ def main() -> None:
         "pr_auc": float(average_precision_score(y_test, proba_mlp)),
     }
 
-    mlp_path = ARTIFACTS_DIR / "mlp_weights.pt"
-    torch.save(mlp.state_dict(), mlp_path)
-
-    print("MLP weights saved to:", mlp_path)
-    
+    torch.save(
+        mlp.state_dict(),
+        ARTIFACTS_DIR / "mlp_weights.pt",
+    )
 
     test_metrics.append(mlp_metrics)
 
-    # ==========================================================
-    # 10. Export Results
-    # ==========================================================
-    metrics_df = pd.DataFrame(test_metrics)
-    metrics_path = ARTIFACTS_DIR / "test_metrics.csv"
-    metrics_df.to_csv(metrics_path, index=False)
+    pd.DataFrame(test_metrics).to_csv(
+        ARTIFACTS_DIR / "test_metrics.csv",
+        index=False,
+    )
 
-    print("\nMetrics saved to:", metrics_path)
+    print("\nTraining completed successfully.")
+    print(f"All results have been saved to: {ARTIFACTS_DIR.resolve()}")
+    print("Generated artifacts:")
+    print(" - cv_metrics.csv")
+    print(" - test_metrics.csv")
+    print(" - best_classical_model.pkl")
+    print(" - mlp_weights.pt")
+    print(" - ROC and PR curve images")
 
 
 if __name__ == "__main__":
