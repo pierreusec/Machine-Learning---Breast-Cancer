@@ -33,7 +33,19 @@ from sklearn.model_selection import StratifiedKFold, train_test_split, cross_val
 from sklearn.pipeline import Pipeline
 from sklearn.impute import SimpleImputer
 from sklearn.preprocessing import StandardScaler
-from sklearn.metrics import accuracy_score, confusion_matrix, f1_score, recall_score, roc_auc_score
+
+from sklearn.metrics import (
+    accuracy_score,
+    confusion_matrix,
+    f1_score,
+    recall_score,
+    roc_auc_score,
+    average_precision_score,
+    roc_curve,
+    precision_recall_curve,
+)
+
+import matplotlib.pyplot as plt
 
 from sklearn.linear_model import LogisticRegression
 from sklearn.tree import DecisionTreeClassifier
@@ -187,16 +199,16 @@ def evaluate_pipeline_on_test(
     y_test: np.ndarray,
     name: str,
 ) -> Dict[str, float]:
-    """
-    Évaluation sur test set.
-    """
+
     y_pred = pipe.predict(X_test)
 
     if hasattr(pipe, "predict_proba"):
         y_proba = pipe.predict_proba(X_test)[:, 1]
         auc = roc_auc_score(y_test, y_proba)
+        pr_auc = average_precision_score(y_test, y_proba)
     else:
         auc = float("nan")
+        pr_auc = float("nan")
 
     acc = accuracy_score(y_test, y_pred)
     f1 = f1_score(y_test, y_pred)
@@ -209,12 +221,61 @@ def evaluate_pipeline_on_test(
     print(f"Accuracy {acc:.4f}")
     print(f"F1 {f1:.4f}")
     print(f"Recall {rec:.4f}")
-    if not np.isnan(auc):
-        print(f"ROC_AUC {auc:.4f}")
+    print(f"ROC_AUC {auc:.4f}")
+    print(f"PR_AUC {pr_auc:.4f}")
     print("Matrice de confusion")
     print(cm)
 
-    return {"accuracy": acc, "f1": f1, "recall": rec, "roc_auc": auc}
+    return {
+        "accuracy": acc,
+        "f1": f1,
+        "recall": rec,
+        "roc_auc": auc,
+        "pr_auc": pr_auc,
+    }
+
+
+def save_roc_pr_curves(
+    y_true: np.ndarray,
+    y_proba: np.ndarray,
+    model_name: str,
+) -> None:
+
+    # ROC Curve
+    fpr, tpr, _ = roc_curve(y_true, y_proba)
+    roc_auc = roc_auc_score(y_true, y_proba)
+
+    plt.figure()
+    plt.plot(fpr, tpr, label=f"AUC = {roc_auc:.4f}")
+    plt.plot([0, 1], [0, 1], linestyle="--")
+    plt.xlabel("False Positive Rate")
+    plt.ylabel("True Positive Rate")
+    plt.title(f"ROC Curve - {model_name}")
+    plt.legend()
+    plt.tight_layout()
+
+    roc_path = ARTIFACTS_DIR / f"{model_name}_roc_curve.png"
+    plt.savefig(roc_path)
+    plt.close()
+
+    # Precision-Recall Curve
+    precision, recall, _ = precision_recall_curve(y_true, y_proba)
+    pr_auc = average_precision_score(y_true, y_proba)
+
+    plt.figure()
+    plt.plot(recall, precision, label=f"PR AUC = {pr_auc:.4f}")
+    plt.xlabel("Recall")
+    plt.ylabel("Precision")
+    plt.title(f"Precision-Recall Curve - {model_name}")
+    plt.legend()
+    plt.tight_layout()
+
+    pr_path = ARTIFACTS_DIR / f"{model_name}_pr_curve.png"
+    plt.savefig(pr_path)
+    plt.close()
+
+    print("ROC curve saved to:", roc_path)
+    print("PR curve saved to:", pr_path)
 
 
 def grid_search_manual_pipeline(
@@ -470,9 +531,18 @@ def main() -> None:
             cv_folds=CV_FOLDS,
         )
 
+        mean_pr, std_pr = cv_scores_pipeline(
+            pipe,
+            X_train_df,
+            y_train,
+            scoring="average_precision",
+            cv_folds=CV_FOLDS,
+        )
+
         print(
             f"{name} | ROC_AUC {mean_auc:.4f} (+/- {std_auc:.4f}) "
-            f"| F1 {mean_f1:.4f} (+/- {std_f1:.4f})"
+            f"| F1 {mean_f1:.4f} (+/- {std_f1:.4f}) "
+            f"| PR_AUC {mean_pr:.4f} (+/- {std_pr:.4f})"
         )
 
         cv_summary.append(
@@ -482,6 +552,8 @@ def main() -> None:
                 "roc_auc_std": std_auc,
                 "f1_mean": mean_f1,
                 "f1_std": std_f1,
+                "pr_auc_mean": mean_pr,
+                "pr_auc_std": std_pr,
             }
         )
 
@@ -627,6 +699,14 @@ def main() -> None:
 
     print("Best classical model saved to:", model_path)
 
+    # Generate ROC and PR curves for best classical model
+    best_proba = best_pipe.predict_proba(X_test_df)[:, 1]
+    save_roc_pr_curves(
+        y_true=y_test,
+        y_proba=best_proba,
+            model_name=best_model_name,
+    )
+
     # ==========================================================
     # 9. Deep Learning Model (MLP)
     # ==========================================================
@@ -659,6 +739,7 @@ def main() -> None:
         "f1": float(f1_score(y_test, pred_mlp)),
         "recall": float(recall_score(y_test, pred_mlp)),
         "roc_auc": float(roc_auc_score(y_test, proba_mlp)),
+        "pr_auc": float(average_precision_score(y_test, proba_mlp)),
     }
 
     mlp_path = ARTIFACTS_DIR / "mlp_weights.pt"
