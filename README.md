@@ -25,22 +25,34 @@ Le projet inclut également un rapport détaillé (`en format pdf`) présentant 
 
 ## 2. Structure du repository
 
-Le projet est organisé selon une séparation stricte des responsabilités :
+Le projet adopte désormais une architecture modulaire afin de séparer clairement les responsabilités et d’améliorer la lisibilité du code.
+
+```
+src/
+    config.py
+        Paramètres globaux du projet (seed, chemins, configuration CV)
+
+    data.py
+        Fonctions de chargement et de préparation des données
+
+    models.py
+        Implémentation des modèles classiques et du Soft Voting manuel
+
+    evaluation.py
+        Validation croisée, calcul des métriques, export des courbes ROC et PR
+
+    dl.py
+        Implémentation du modèle de Deep Learning (MLP tabulaire)
+
+    train.py
+        Script principal orchestrant l’ensemble du pipeline expérimental
 
 Notebook/
-EDA.ipynb
-Analyse exploratoire et contrôle qualité des données
-Aucune modélisation n’est réalisée dans ce notebook
-
-src/
-train.py
-Script principal d’entraînement, validation croisée, optimisation et évaluation
+    EDA.ipynb
+        Analyse exploratoire des données (aucune modélisation)
 
 artifacts/
-Fichiers de sortie générés automatiquement (non versionnés)
-
-data/
-Données locales (non versionnées)
+    Résultats générés automatiquement (non versionnés)
 
 Le dossier `artifacts/` contient notamment :
 
@@ -50,6 +62,25 @@ Le dossier `artifacts/` contient notamment :
 * `mlp_weights.pt`
 * `roc_curve.png`
 * `pr_curve.png`
+
+data/
+    Données locales (non nécessaires à l’exécution)
+```
+
+Le dossier `artifacts/` contient notamment :
+
+* `cv_metrics.csv`
+* `test_metrics.csv`
+* `best_classical_model.pkl`
+* `mlp_weights.pt`
+* `roc_curve.png`
+* `pr_curve.png`
+
+Cette organisation permet :
+
+- Une meilleure maintenabilité du code
+- Une séparation claire entre données, modèles, évaluation et deep learning
+- Une architecture cohérente avec les standards professionnels en Machine Learning
 
 ---
 
@@ -82,21 +113,24 @@ pip install -r requirements.txt
 
 L’entraînement complet s’exécute via :
 
+```bash
 python src/train.py
+```
 
-Ce script :
+Le script :
 
-* Télécharge les données via KaggleHub
-* Effectue un split train/test stratifié (80/20)
-* Applique un preprocessing appris uniquement sur le train
-* Réalise une validation croisée stratifiée (k = 5)
-* Compare plusieurs modèles classiques
-* Implémente un soft voting manuel
-* Effectue une optimisation manuelle d’hyperparamètres pour le Decision Tree
-* Entraîne un MLP tabulaire avec early stopping
-* Évalue tous les modèles sur un test set strictement hors-échantillon
-* Calcule Accuracy, F1-score, Recall, ROC-AUC et PR-AUC
-* Exporte automatiquement les métriques, modèles et courbes
+- Télécharge automatiquement le dataset via KaggleHub
+- Effectue un split train/test stratifié
+- Réalise une validation croisée (ROC-AUC, F1-score, PR-AUC)
+- Compare plusieurs modèles classiques
+- Implémente un Soft Voting manuel
+- Entraîne un modèle de Deep Learning (MLP tabulaire)
+- Évalue les performances sur un jeu de test strict
+- Exporte les métriques, modèles entraînés et courbes ROC/PR
+
+Tous les résultats sont sauvegardés dans le dossier :
+
+artifacts/
 
 ---
 
